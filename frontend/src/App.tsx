@@ -438,7 +438,7 @@ export default function App() {
   const activeProfile = profile as Profile | null;
   if (activeProfile) return <Dashboard profile={activeProfile} onLogout={logout} onProfileUpdate={setProfile} />;
 
-  const title = screen === 'register' ? 'Join the club.' : screen === 'forgot' ? 'Lost your password?' : screen === 'reset' ? 'New password. New plate.' : screen === 'profile' ? 'Your membership card.' : 'Find your next event.';
+  const title = screen === 'login' ? "Nobody invited us. We're coming anyway." : screen === 'register' ? 'Join the club.' : screen === 'forgot' ? 'Lost your password?' : screen === 'reset' ? 'New password. New plate.' : screen === 'profile' ? 'Your membership card.' : 'Find your next event.';
   return (
     <main className="page-shell">
       <header className="topbar">
@@ -447,10 +447,10 @@ export default function App() {
       </header>
       <section className="auth-layout" aria-labelledby="auth-title">
         <div className="auth-copy">
-          <p className="eyebrow"><span className="status-dot" /> YOUR NEIGHBORHOOD FOOD DESK</p>
+          <p className="eyebrow"><span className="status-dot" /> {screen === 'login' ? 'CRASH CLUB · THE UNOFFICIAL GUEST LIST' : 'YOUR NEIGHBORHOOD FOOD DESK'}</p>
           <h1 id="auth-title">{title}</h1>
-          <p className="intro">Big plans. Small plates. Excellent events. We’re assembling the guest list one hungry human at a time.</p>
-          <div className="coming-soon"><span aria-hidden="true">✳</span> No secret handshake. A strong snack opinion helps.</div>
+          <p className="intro">{screen === 'login' ? 'Big plans. Suspicious buffets. Unexpected friendships. Find your next event and assemble your crew.' : 'Big plans. Small plates. Excellent events. We’re assembling the guest list one hungry human at a time.'}</p>
+          <div className="coming-soon"><span aria-hidden="true">✳</span> {screen === 'login' ? 'No invitation required to browse.' : 'No secret handshake. A strong snack opinion helps.'}</div>
         </div>
         <section className="auth-card" aria-label="Account access">
           {screen === 'profile' && profile ? <>
