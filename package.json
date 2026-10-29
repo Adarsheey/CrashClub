@@ -1,0 +1,26 @@
+{
+  "name": "crash-club",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c yellow,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace backend run dev",
+    "dev:web": "npm --workspace frontend run dev",
+    "build": "npm run build --workspace backend && npm run build --workspace frontend",
+    "test": "npm test --workspace backend",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:migrate": "npm --workspace backend run db:migrate",
+    "db:generate": "npm --workspace backend run db:generate",
+    "db:deploy": "npm --workspace backend run db:deploy",
+    "db:smoke": "npm --workspace backend run db:smoke"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  },
+  "allowScripts": {}
+}

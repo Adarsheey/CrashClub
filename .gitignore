@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+backend/src/generated/
+backend/uploads/avatars/
+npm-debug.log*

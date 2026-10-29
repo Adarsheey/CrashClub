@@ -1,0 +1,319 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AccountStatus {
+  PENDING_EMAIL
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum UserRole {
+  MEMBER
+  MODERATOR
+  ADMIN
+}
+
+enum EmailActionPurpose {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+  CLOSED
+}
+
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+  DELETED
+}
+
+enum PostVisibility {
+  PUBLIC
+  FRIENDS
+}
+
+enum EventVisibility {
+  PUBLIC
+  INVITE_ONLY
+}
+
+enum RsvpStatus {
+  PENDING
+  GOING
+  MAYBE
+  DECLINED
+}
+
+enum NotificationType {
+  FRIEND_REQUEST
+  FRIEND_REQUEST_ACCEPTED
+  MESSAGE
+  EVENT_INVITATION
+  EVENT_UPDATED
+  RSVP_UPDATED
+  MODERATION_UPDATE
+}
+
+enum ReportStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+model User {
+  id                 String        @id @default(uuid()) @db.Uuid
+  email              String        @unique
+  username           String        @unique
+  passwordHash       String
+  displayName        String
+  bio                String        @default("")
+  avatarUrl          String?
+  status             AccountStatus @default(PENDING_EMAIL)
+  role               UserRole     @default(MEMBER)
+  emailVerifiedAt    DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  sessions           Session[]
+  emailActionTokens  EmailActionToken[]
+  requestsSent       FriendRequest[] @relation("RequestSender")
+  requestsReceived   FriendRequest[] @relation("RequestRecipient")
+  friendshipsLow     Friendship[] @relation("FriendLow")
+  friendshipsHigh    Friendship[] @relation("FriendHigh")
+  blocksMade         Block[] @relation("Blocker")
+  blocksReceived     Block[] @relation("Blocked")
+  posts              Post[]
+  postRecipients     PostRecipient[]
+  events             Event[]
+  invitationsSent    EventInvitation[] @relation("Inviter")
+  invitations        EventInvitation[] @relation("Invitee")
+  conversationsLow   Conversation[] @relation("ConversationLow")
+  conversationsHigh  Conversation[] @relation("ConversationHigh")
+  messages           Message[]
+  notifications      Notification[] @relation("NotificationRecipient")
+  reportsFiled       Report[] @relation("Reporter")
+  reportsAgainst     Report[] @relation("ReportedUser")
+  moderationActions  ModerationAction[] @relation("Moderator")
+
+  @@index([displayName])
+  @@index([status, createdAt])
+}
+
+model Session {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  tokenHash   String   @unique
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model EmailActionToken {
+  id          String             @id @default(uuid()) @db.Uuid
+  userId      String             @db.Uuid
+  tokenHash   String             @unique
+  purpose     EmailActionPurpose
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime           @default(now())
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose, expiresAt])
+}
+
+model FriendRequest {
+  id           String             @id @default(uuid()) @db.Uuid
+  pairLowId    String             @db.Uuid
+  pairHighId   String             @db.Uuid
+  requesterId  String             @db.Uuid
+  recipientId  String             @db.Uuid
+  status       FriendRequestStatus @default(PENDING)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  requester    User               @relation("RequestSender", fields: [requesterId], references: [id], onDelete: Cascade)
+  recipient    User               @relation("RequestRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([pairLowId, pairHighId])
+  @@index([recipientId, status, createdAt])
+}
+
+model Friendship {
+  id          String   @id @default(uuid()) @db.Uuid
+  pairLowId   String   @db.Uuid
+  pairHighId  String   @db.Uuid
+  createdAt   DateTime @default(now())
+  lowUser     User     @relation("FriendLow", fields: [pairLowId], references: [id], onDelete: Cascade)
+  highUser    User     @relation("FriendHigh", fields: [pairHighId], references: [id], onDelete: Cascade)
+
+  @@unique([pairLowId, pairHighId])
+  @@index([pairLowId])
+  @@index([pairHighId])
+}
+
+model Block {
+  id          String   @id @default(uuid()) @db.Uuid
+  blockerId   String   @db.Uuid
+  blockedId   String   @db.Uuid
+  createdAt   DateTime @default(now())
+  blocker     User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked     User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+model Post {
+  id          String         @id @default(uuid()) @db.Uuid
+  authorId    String         @db.Uuid
+  eventId     String?        @db.Uuid
+  body        String
+  imageUrl    String?
+  status      PostStatus     @default(DRAFT)
+  visibility  PostVisibility @default(PUBLIC)
+  category    String         @default("GENERAL")
+  publishedAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  author      User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  event       Event?         @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  recipients  PostRecipient[]
+
+  @@index([status, visibility, publishedAt])
+  @@index([category, status, publishedAt])
+  @@index([eventId])
+  @@index([authorId, status, publishedAt])
+}
+
+model PostRecipient {
+  id           String   @id @default(uuid()) @db.Uuid
+  postId       String   @db.Uuid
+  recipientId  String   @db.Uuid
+  createdAt    DateTime @default(now())
+  revokedAt    DateTime?
+  post         Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  recipient    User     @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, recipientId])
+  @@index([recipientId, postId])
+}
+
+model Event {
+  id          String         @id @default(uuid()) @db.Uuid
+  creatorId   String         @db.Uuid
+  title       String
+  description String         @default("")
+  location    String?
+  startsAt    DateTime
+  endsAt      DateTime?
+  visibility  EventVisibility @default(INVITE_ONLY)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  creator     User           @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  invitations EventInvitation[]
+  intelPosts  Post[]
+
+  @@index([visibility, startsAt])
+  @@index([creatorId, startsAt])
+}
+
+model EventInvitation {
+  id          String     @id @default(uuid()) @db.Uuid
+  eventId     String     @db.Uuid
+  inviteeId   String     @db.Uuid
+  inviterId   String     @db.Uuid
+  rsvp        RsvpStatus @default(PENDING)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  event       Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  invitee     User       @relation("Invitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+  inviter     User       @relation("Inviter", fields: [inviterId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, inviteeId])
+  @@index([inviteeId, rsvp, createdAt])
+}
+
+model Conversation {
+  id          String   @id @default(uuid()) @db.Uuid
+  pairLowId   String   @db.Uuid
+  pairHighId  String   @db.Uuid
+  createdAt   DateTime @default(now())
+  lowUser     User     @relation("ConversationLow", fields: [pairLowId], references: [id], onDelete: Cascade)
+  highUser    User     @relation("ConversationHigh", fields: [pairHighId], references: [id], onDelete: Cascade)
+  messages    Message[]
+
+  @@unique([pairLowId, pairHighId])
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  senderId       String       @db.Uuid
+  body           String
+  createdAt      DateTime     @default(now())
+  readAt         DateTime?
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model Notification {
+  id          String           @id @default(uuid()) @db.Uuid
+  recipientId String           @db.Uuid
+  type        NotificationType
+  entityType  String?
+  entityId    String?          @db.Uuid
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+  recipient  User              @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, readAt, createdAt])
+}
+
+model Report {
+  id              String       @id @default(uuid()) @db.Uuid
+  reporterId      String       @db.Uuid
+  reportedUserId  String?      @db.Uuid
+  postId          String?      @db.Uuid
+  eventId         String?      @db.Uuid
+  reason          String
+  details         String       @default("")
+  status          ReportStatus @default(OPEN)
+  moderatorNotes  String       @default("")
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  reporter        User         @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser    User?        @relation("ReportedUser", fields: [reportedUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([reporterId, createdAt])
+}
+
+model ModerationAction {
+  id          String   @id @default(uuid()) @db.Uuid
+  moderatorId String   @db.Uuid
+  action      String
+  entityType  String
+  entityId    String   @db.Uuid
+  reason      String
+  createdAt   DateTime @default(now())
+  moderator  User     @relation("Moderator", fields: [moderatorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+}
