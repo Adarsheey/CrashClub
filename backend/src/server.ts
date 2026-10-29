@@ -12,7 +12,9 @@ const port = Number(process.env.PORT ?? 3000);
 // Mount the authenticated routes on the real API server, not just in tests.
 let io: Server;
 const app = createApp(prisma, prisma, undefined, (userId, notification) => {
-  io?.to(`user:${userId}`).emit('notification', notification);
+  const userRoom = io?.to(`user:${userId}`);
+  if (notification.type === 'REALTIME_MESSAGE' && notification.message) userRoom?.emit('message', notification.message);
+  else userRoom?.emit('notification', notification);
 });
 const server = createServer(app);
 io = new Server(server);

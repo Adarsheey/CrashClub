@@ -3,13 +3,13 @@ import { resolve } from 'node:path';
 import cookieParser from 'cookie-parser';
 import type { PrismaClient } from './generated/prisma/client.js';
 import { avatarUploadDirectory, createAuthRouter, createPublicProfileRouter, type Mailer } from './auth.js';
-import { createSocialRouter } from './social.js';
+import { createSocialRouter, type Notify } from './social.js';
 
 export type DatabaseHealthCheck = {
   $queryRawUnsafe: (query: string) => Promise<unknown>;
 };
 
-export function createApp(database: DatabaseHealthCheck, authDatabase?: PrismaClient, mailer?: Mailer, notify?: (userId: string, notification: { id: string; type: string; entityType: string | null; entityId: string | null; createdAt: Date }) => void) {
+export function createApp(database: DatabaseHealthCheck, authDatabase?: PrismaClient, mailer?: Mailer, notify?: Notify) {
   const app = express();
   app.disable('x-powered-by');
   app.use('/uploads/avatars', express.static(resolve(avatarUploadDirectory()), { dotfiles: 'deny', index: false, fallthrough: true, maxAge: '1y', immutable: true, setHeaders: (response) => response.setHeader('X-Content-Type-Options', 'nosniff') }));

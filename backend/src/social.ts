@@ -7,10 +7,15 @@ import type { PrismaClient, User } from './generated/prisma/client.js';
 const cookieName = 'crash_club_session';
 const digest = (token: string) => createHash('sha256').update(token).digest('hex');
 const publicUserSelect = { id: true, username: true, displayName: true, avatarUrl: true } as const;
-type Notify = (userId: string, notification: { id: string; type: string; entityType: string | null; entityId: string | null; createdAt: Date }) => void;
+type RealtimeMessage = { id: string; conversationId: string; senderId: string; body: string; createdAt: Date; sender: { id: string; username: string; displayName: string; avatarUrl: string | null } };
+export type Notify = (userId: string, notification: { id: string; type: string; entityType: string | null; entityId: string | null; createdAt: Date; message?: RealtimeMessage }) => void;
 const idSchema = z.uuid();
 const text = (max: number) => z.string().trim().min(1).max(max);
 const optionalUrl = z.union([z.url().max(2048).refine((value) => URL.canParse(value) && ['http:', 'https:'].includes(new URL(value).protocol)), z.literal('')]).nullable().optional();
+const googleMapsUrl = z.union([z.url().max(2048).refine((value) => {
+  const url = new URL(value);
+  return url.protocol === 'https:' && (url.hostname === 'maps.app.goo.gl' || url.hostname === 'goo.gl' && url.pathname.startsWith('/maps') || url.hostname === 'maps.google.com' || url.hostname === 'google.com' || url.hostname.endsWith('.google.com'));
+}, 'Enter a Google Maps link.'), z.literal('')]).nullable().optional();
 const pair = (a: string, b: string) => [a, b].sort() as [string, string];
 
 export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => {}) {
@@ -29,10 +34,18 @@ export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => 
   const me = (res: Response) => res.locals.user as User;
   const blocked = async (a: string, b: string) => Boolean(await prisma.block.findFirst({ where: { OR: [{ blockerId: a, blockedId: b }, { blockerId: b, blockedId: a }] }, select: { id: true } }));
   const areFriends = async (a: string, b: string) => { const [low, high] = pair(a, b); return Boolean(await prisma.friendship.findUnique({ where: { pairLowId_pairHighId: { pairLowId: low, pairHighId: high } }, select: { id: true } })); };
-  const sendNotification = async (recipientId: string, type: 'FRIEND_REQUEST' | 'FRIEND_REQUEST_ACCEPTED' | 'MESSAGE' | 'EVENT_INVITATION' | 'EVENT_UPDATED' | 'RSVP_UPDATED' | 'MODERATION_UPDATE', entityType: string, entityId: string) => {
+  const sendNotification = async (recipientId: string, type: 'FRIEND_REQUEST' | 'FRIEND_REQUEST_ACCEPTED' | 'MESSAGE' | 'EVENT_INVITATION' | 'EVENT_UPDATED' | 'RSVP_UPDATED' | 'POST_COMMENT' | 'POST_REACTION' | 'MODERATION_UPDATE', entityType: string, entityId: string) => {
     const item = await prisma.notification.create({ data: { recipientId, type, entityType, entityId }, select: { id: true, type: true, entityType: true, entityId: true, createdAt: true } });
     notify(recipientId, item);
   };
+  const visiblePost = async (postId: string, viewerId: string) => {
+    const post = await prisma.post.findFirst({ where: { id: postId, status: 'PUBLISHED' }, include: { recipients: { where: { recipientId: viewerId, revokedAt: null }, select: { recipientId: true } } } });
+    if (!post) return null;
+    if (post.visibility === 'PUBLIC' || post.authorId === viewerId) return post;
+    if (!post.recipients.length || await blocked(viewerId, post.authorId) || !await areFriends(viewerId, post.authorId)) return null;
+    return post;
+  };
+  const canInteractWithPost = async (post: { authorId: string }, viewerId: string) => !await blocked(viewerId, post.authorId);
 
   router.get('/me', (_req, res) => res.json({ role: me(res).role }));
 
@@ -154,6 +167,64 @@ export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => 
     });
     return res.json({ posts: visiblePosts });
   });
+  router.get('/posts/:id/interactions', async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    if (!id.success) return res.status(404).json({ error: 'That intel is not available.' });
+    const post = await visiblePost(id.data, me(res).id);
+    if (!post) return res.status(404).json({ error: 'That intel is not available.' });
+    const [comments, reactions, myReaction] = await Promise.all([
+      prisma.postComment.findMany({ where: { postId: post.id }, include: { author: { select: publicUserSelect } }, orderBy: { createdAt: 'asc' }, take: 200 }),
+      prisma.postReaction.groupBy({ by: ['emoji'], where: { postId: post.id }, _count: { _all: true } }),
+      prisma.postReaction.findUnique({ where: { postId_userId: { postId: post.id, userId: me(res).id } }, select: { emoji: true } }),
+    ]);
+    return res.json({ comments, reactions: reactions.map((reaction: any) => ({ emoji: reaction.emoji, count: reaction._count._all })), myReaction: myReaction?.emoji ?? null });
+  });
+  router.post('/posts/:id/comments', actionLimit, async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    const parsed = z.object({ body: text(2000) }).strict().safeParse(req.body);
+    if (!id.success || !parsed.success) return res.status(400).json({ error: 'Comments need a little text, up to 2,000 characters.' });
+    const post = await visiblePost(id.data, me(res).id);
+    if (!post) return res.status(404).json({ error: 'That intel is not available.' });
+    if (!await canInteractWithPost(post, me(res).id)) return res.status(403).json({ error: 'You cannot interact with this member’s intel.' });
+    const comment = await prisma.postComment.create({ data: { postId: post.id, authorId: me(res).id, body: parsed.data.body }, include: { author: { select: publicUserSelect } } });
+    if (post.authorId !== me(res).id) await sendNotification(post.authorId, 'POST_COMMENT', 'post', post.id);
+    return res.status(201).json({ comment });
+  });
+  router.patch('/posts/:id/comments/:commentId', actionLimit, async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    const commentId = idSchema.safeParse(req.params.commentId);
+    const parsed = z.object({ body: text(2000) }).strict().safeParse(req.body);
+    if (!id.success || !commentId.success || !parsed.success) return res.status(400).json({ error: 'Check the comment and try again.' });
+    const post = await visiblePost(id.data, me(res).id);
+    if (!post) return res.status(404).json({ error: 'That intel is not available.' });
+    if (!await canInteractWithPost(post, me(res).id)) return res.status(403).json({ error: 'You cannot interact with this member’s intel.' });
+    const comment = await prisma.postComment.updateMany({ where: { id: commentId.data, postId: post.id, authorId: me(res).id }, data: { body: parsed.data.body } });
+    if (!comment.count) return res.status(404).json({ error: 'That comment is not yours to edit.' });
+    return res.json({ message: 'Comment tidied up.' });
+  });
+  router.delete('/posts/:id/comments/:commentId', actionLimit, async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    const commentId = idSchema.safeParse(req.params.commentId);
+    if (!id.success || !commentId.success) return res.status(400).json({ error: 'That comment is invalid.' });
+    const post = await visiblePost(id.data, me(res).id);
+    if (!post) return res.status(404).json({ error: 'That intel is not available.' });
+    const deleted = await prisma.postComment.deleteMany({ where: { id: commentId.data, postId: post.id, authorId: me(res).id } });
+    return deleted.count ? res.json({ message: 'Your comment has been removed.' }) : res.status(404).json({ error: 'That comment is not yours to remove.' });
+  });
+  router.post('/posts/:id/reactions', actionLimit, async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    const parsed = z.object({ emoji: z.enum(['😂', '🍗', '👀', '🔥']) }).strict().safeParse(req.body);
+    if (!id.success || !parsed.success) return res.status(400).json({ error: 'Choose one of the club’s approved reactions.' });
+    const post = await visiblePost(id.data, me(res).id);
+    if (!post) return res.status(404).json({ error: 'That intel is not available.' });
+    if (!await canInteractWithPost(post, me(res).id)) return res.status(403).json({ error: 'You cannot interact with this member’s intel.' });
+    const previous = await prisma.postReaction.findUnique({ where: { postId_userId: { postId: post.id, userId: me(res).id } }, select: { emoji: true } });
+    if (previous?.emoji !== parsed.data.emoji) {
+      await prisma.postReaction.upsert({ where: { postId_userId: { postId: post.id, userId: me(res).id } }, create: { postId: post.id, userId: me(res).id, emoji: parsed.data.emoji }, update: { emoji: parsed.data.emoji } });
+      if (post.authorId !== me(res).id) await sendNotification(post.authorId, 'POST_REACTION', 'post', post.id);
+    }
+    return res.json({ myReaction: parsed.data.emoji });
+  });
   router.post('/posts', actionLimit, async (req, res) => {
     const parsed = postBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Check the post details and try again.' });
@@ -214,19 +285,35 @@ export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => 
   router.get('/events', async (req, res) => {
     const parsed = z.object({ q: z.string().trim().max(100).default(''), from: z.string().datetime().optional() }).safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: 'Those event filters are invalid.' });
-    const events = await prisma.event.findMany({ where: { startsAt: { gte: parsed.data.from ? new Date(parsed.data.from) : new Date(Date.now() - 86_400_000) }, AND: [ ...(parsed.data.q ? [{ OR: [{ title: { contains: parsed.data.q, mode: 'insensitive' as const } }, { description: { contains: parsed.data.q, mode: 'insensitive' as const } }, { location: { contains: parsed.data.q, mode: 'insensitive' as const } }] }] : []), { OR: [{ visibility: 'PUBLIC' }, { creatorId: me(res).id }, { invitations: { some: { inviteeId: me(res).id } } }] } ] }, include: { creator: { select: publicUserSelect }, invitations: { where: { inviteeId: me(res).id }, select: { rsvp: true } } }, orderBy: { startsAt: 'asc' }, take: 50 });
-    return res.json({ events });
+    const viewerId = me(res).id;
+    const events = await prisma.event.findMany({ where: { startsAt: { gte: parsed.data.from ? new Date(parsed.data.from) : new Date(Date.now() - 86_400_000) }, AND: [ ...(parsed.data.q ? [{ OR: [{ title: { contains: parsed.data.q, mode: 'insensitive' as const } }, { description: { contains: parsed.data.q, mode: 'insensitive' as const } }, { location: { contains: parsed.data.q, mode: 'insensitive' as const } }] }] : []), { OR: [{ visibility: 'PUBLIC' }, { creatorId: viewerId }, { invitations: { some: { inviteeId: viewerId } } }] } ] }, include: { creator: { select: publicUserSelect }, invitations: { where: { inviteeId: viewerId }, select: { rsvp: true } } }, orderBy: { startsAt: 'asc' }, take: 50 });
+    const eventIds = events.map((event: any) => event.id);
+    if (!eventIds.length) return res.json({ events: [] });
+    const [friendships, blocks] = await Promise.all([
+      prisma.friendship.findMany({ where: { OR: [{ pairLowId: viewerId }, { pairHighId: viewerId }] }, select: { pairLowId: true, pairHighId: true } }),
+      prisma.block.findMany({ where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] }, select: { blockerId: true, blockedId: true } }),
+    ]);
+    const friendIds = friendships.map((friendship: any) => friendship.pairLowId === viewerId ? friendship.pairHighId : friendship.pairLowId);
+    const blockedIds = blocks.map((block: any) => block.blockerId === viewerId ? block.blockedId : block.blockerId);
+    const intelPosts = await prisma.post.findMany({ where: { eventId: { in: eventIds }, status: 'PUBLISHED', AND: [
+      { OR: [{ visibility: 'PUBLIC' }, { authorId: viewerId }, { visibility: 'FRIENDS', authorId: { in: friendIds }, recipients: { some: { recipientId: viewerId, revokedAt: null } } }] },
+      { OR: [{ visibility: 'PUBLIC' }, { authorId: { notIn: blockedIds } }] },
+    ] }, select: { id: true, eventId: true } });
+    const postIdsByEvent = new Map<string, string[]>();
+    for (const post of intelPosts) if (post.eventId) postIdsByEvent.set(post.eventId, [...(postIdsByEvent.get(post.eventId) ?? []), post.id]);
+    return res.json({ events: events.map((event: any) => ({ ...event, intelPostIds: postIdsByEvent.get(event.id) ?? [] })) });
   });
   router.post('/events', actionLimit, async (req, res) => {
-    const parsed = z.object({ title: text(120), description: z.string().trim().max(4000).default(''), intelNote: z.string().trim().max(2000).default(''), location: z.string().trim().max(200).optional(), startsAt: z.iso.datetime(), endsAt: z.iso.datetime().optional(), visibility: z.enum(['PUBLIC', 'INVITE_ONLY']).default('INVITE_ONLY'), inviteeIds: z.array(idSchema).max(100).default([]), postVisibility: z.enum(['PUBLIC', 'FRIENDS']).default('PUBLIC'), postRecipientIds: z.array(idSchema).max(100).default([]) }).strict().safeParse(req.body);
+    const parsed = z.object({ title: text(120), description: z.string().trim().max(4000).default(''), intelNote: z.string().trim().max(2000).default(''), location: z.string().trim().max(200).optional(), mapUrl: googleMapsUrl, startsAt: z.iso.datetime(), endsAt: z.iso.datetime().optional(), visibility: z.enum(['PUBLIC', 'INVITE_ONLY']).default('INVITE_ONLY'), inviteeIds: z.array(idSchema).max(100).default([]), postVisibility: z.enum(['PUBLIC', 'FRIENDS']).default('PUBLIC'), postRecipientIds: z.array(idSchema).max(100).default([]) }).strict().safeParse(req.body);
     if (!parsed.success || (parsed.success && parsed.data.endsAt && new Date(parsed.data.endsAt) < new Date(parsed.data.startsAt))) return res.status(400).json({ error: 'Check the event details and date.' });
     const data = parsed.data;
+    if (data.visibility === 'INVITE_ONLY' && data.inviteeIds.length === 0) return res.status(400).json({ error: 'Choose at least one friend for an invite-only event.' });
     const audienceIds = [...new Set([...data.inviteeIds, ...data.postRecipientIds])];
     const accepted = audienceIds.length ? await prisma.friendship.findMany({ where: { OR: [{ pairLowId: me(res).id, pairHighId: { in: audienceIds } }, { pairHighId: me(res).id, pairLowId: { in: audienceIds } }] } }) : [];
     if (new Set(data.inviteeIds).size !== data.inviteeIds.length || new Set(data.postRecipientIds).size !== data.postRecipientIds.length || new Set(audienceIds).size !== accepted.length || audienceIds.includes(me(res).id) || (data.postVisibility === 'FRIENDS' && !data.postRecipientIds.length) || (await prisma.block.count({ where: { OR: [{ blockerId: me(res).id, blockedId: { in: audienceIds } }, { blockedId: me(res).id, blockerId: { in: audienceIds } }] } }))) return res.status(400).json({ error: 'Choose current friends for the invitation or friends-only intel audience.' });
     const eventAndPost = await prisma.$transaction(async (transactionClient) => {
       const tx = transactionClient as unknown as PrismaClient;
-      const event = await tx.event.create({ data: { creatorId: me(res).id, title: data.title, description: data.description, location: data.location || null, startsAt: new Date(data.startsAt), endsAt: data.endsAt ? new Date(data.endsAt) : null, visibility: data.visibility, invitations: { create: [...new Set(data.inviteeIds)].map((inviteeId) => ({ inviteeId, inviterId: me(res).id })) } }, include: { creator: { select: publicUserSelect } } });
+      const event = await tx.event.create({ data: { creatorId: me(res).id, title: data.title, description: data.description, location: data.location || null, mapUrl: data.mapUrl || null, startsAt: new Date(data.startsAt), endsAt: data.endsAt ? new Date(data.endsAt) : null, visibility: data.visibility, invitations: { create: [...new Set(data.inviteeIds)].map((inviteeId) => ({ inviteeId, inviterId: me(res).id })) } }, include: { creator: { select: publicUserSelect } } });
       const post = await tx.post.create({ data: { authorId: me(res).id, eventId: event.id, body: data.intelNote || 'New food event intel. Check the Events page if you have access.', category: 'EVENT', status: 'PUBLISHED', visibility: data.postVisibility, publishedAt: new Date(), recipients: data.postVisibility === 'FRIENDS' ? { create: [...new Set(data.postRecipientIds)].map((recipientId) => ({ recipientId })) } : undefined }, include: { author: { select: publicUserSelect }, event: { select: { id: true, title: true, location: true, startsAt: true, endsAt: true, visibility: true, creatorId: true } } } });
       return { event, post };
     });
@@ -235,14 +322,14 @@ export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => 
   });
   router.patch('/events/:id', actionLimit, async (req, res) => {
     const id = idSchema.safeParse(req.params.id);
-    const parsed = z.object({ title: text(120).optional(), description: z.string().trim().max(4000).optional(), location: z.string().trim().max(200).nullable().optional(), startsAt: z.iso.datetime().optional(), endsAt: z.iso.datetime().nullable().optional(), visibility: z.enum(['PUBLIC', 'INVITE_ONLY']).optional() }).strict().refine((v) => Object.keys(v).length > 0).safeParse(req.body);
+    const parsed = z.object({ title: text(120).optional(), description: z.string().trim().max(4000).optional(), location: z.string().trim().max(200).nullable().optional(), mapUrl: googleMapsUrl, startsAt: z.iso.datetime().optional(), endsAt: z.iso.datetime().nullable().optional(), visibility: z.enum(['PUBLIC', 'INVITE_ONLY']).optional() }).strict().refine((v) => Object.keys(v).length > 0).safeParse(req.body);
     if (!id.success || !parsed.success) return res.status(400).json({ error: 'Check the event edit.' });
     const event = await prisma.event.findFirst({ where: { id: id.data, creatorId: me(res).id } });
     if (!event) return res.status(404).json({ error: 'That event is not yours to rearrange.' });
     const nextStart = parsed.data.startsAt ? new Date(parsed.data.startsAt) : event.startsAt;
     const nextEnd = parsed.data.endsAt === undefined ? event.endsAt : parsed.data.endsAt ? new Date(parsed.data.endsAt) : null;
     if (nextEnd && nextEnd < nextStart) return res.status(400).json({ error: 'The event needs to end after it starts.' });
-    const updated = await prisma.event.update({ where: { id: event.id }, data: parsed.data });
+    const updated = await prisma.event.update({ where: { id: event.id }, data: { ...parsed.data, ...(parsed.data.mapUrl !== undefined ? { mapUrl: parsed.data.mapUrl || null } : {}) } });
     const invitees = await prisma.eventInvitation.findMany({ where: { eventId: event.id }, select: { inviteeId: true } });
     for (const invitation of invitees) if (!await blocked(me(res).id, invitation.inviteeId)) await sendNotification(invitation.inviteeId, 'EVENT_UPDATED', 'event', event.id);
     return res.json({ event: updated });
@@ -304,7 +391,7 @@ export function createSocialRouter(prisma: PrismaClient, notify: Notify = () => 
     if (await blocked(me(res).id, otherId) || !await areFriends(me(res).id, otherId)) return res.status(403).json({ error: 'You need an active, unblocked friendship to send a new message.' });
     const message = await prisma.message.create({ data: { conversationId: conversation.id, senderId: me(res).id, body: parsed.data.body }, include: { sender: { select: publicUserSelect } } });
     await sendNotification(otherId, 'MESSAGE', 'conversation', conversation.id);
-    notify(otherId, { id: message.id, type: 'REALTIME_MESSAGE', entityType: 'conversation', entityId: conversation.id, createdAt: message.createdAt });
+    notify(otherId, { id: message.id, type: 'REALTIME_MESSAGE', entityType: 'conversation', entityId: conversation.id, createdAt: message.createdAt, message });
     return res.status(201).json({ message });
   });
 

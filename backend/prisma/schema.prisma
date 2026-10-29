@@ -63,6 +63,8 @@ enum NotificationType {
   EVENT_INVITATION
   EVENT_UPDATED
   RSVP_UPDATED
+  POST_COMMENT
+  POST_REACTION
   MODERATION_UPDATE
 }
 
@@ -97,6 +99,8 @@ model User {
   blocksReceived     Block[] @relation("Blocked")
   posts              Post[]
   postRecipients     PostRecipient[]
+  postComments       PostComment[]
+  postReactions      PostReaction[]
   events             Event[]
   invitationsSent    EventInvitation[] @relation("Inviter")
   invitations        EventInvitation[] @relation("Invitee")
@@ -193,6 +197,8 @@ model Post {
   author      User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
   event       Event?         @relation(fields: [eventId], references: [id], onDelete: SetNull)
   recipients  PostRecipient[]
+  comments    PostComment[]
+  reactions   PostReaction[]
 
   @@index([status, visibility, publishedAt])
   @@index([category, status, publishedAt])
@@ -213,12 +219,41 @@ model PostRecipient {
   @@index([recipientId, postId])
 }
 
+model PostComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @db.Uuid
+  authorId  String   @db.Uuid
+  body      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@index([authorId, postId])
+}
+
+model PostReaction {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @db.Uuid
+  userId    String   @db.Uuid
+  emoji     String   @db.VarChar(16)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, userId])
+  @@index([postId, emoji])
+}
+
 model Event {
   id          String         @id @default(uuid()) @db.Uuid
   creatorId   String         @db.Uuid
   title       String
   description String         @default("")
   location    String?
+  mapUrl      String?
   startsAt    DateTime
   endsAt      DateTime?
   visibility  EventVisibility @default(INVITE_ONLY)

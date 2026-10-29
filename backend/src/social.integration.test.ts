@@ -25,7 +25,10 @@ test('social platform protects audiences and preserves histories', { timeout: 18
     const tokens = created.map(() => randomBytes(32).toString('base64url'));
     await Promise.all(created.map((u: any, i: number) => prisma.session.create({ data: { userId: u.id, tokenHash: createHash('sha256').update(tokens[i]!).digest('hex'), expiresAt: new Date(Date.now() + 15 * 60_000) } })));
     let liveSocketServer: Server | undefined;
-    const app = createApp(prisma, prisma, undefined, (userId, notification) => liveSocketServer?.to(`user:${userId}`).emit('notification', notification));
+    const app = createApp(prisma, prisma, undefined, (userId, notification) => {
+      if (notification.type === 'REALTIME_MESSAGE' && notification.message) liveSocketServer?.to(`user:${userId}`).emit('message', notification.message);
+      else liveSocketServer?.to(`user:${userId}`).emit('notification', notification);
+    });
     const httpServer = createServer(app);
     socketServer = new Server(httpServer);
     liveSocketServer = socketServer;
@@ -60,6 +63,24 @@ test('social platform protects audiences and preserves histories', { timeout: 18
     assert.equal(draft.status, 201);
     assert.equal((await bob.get('/api/social/posts')).body.posts.some((p: any) => p.id === privatePost.body.post.id), true);
     assert.equal((await cara.get('/api/social/posts')).body.posts.some((p: any) => p.id === privatePost.body.post.id), false);
+    assert.equal((await cara.get(`/api/social/posts/${privatePost.body.post.id}/interactions`)).status, 404, 'unauthorized members cannot read private-post comments or reactions');
+    assert.equal((await cara.post(`/api/social/posts/${privatePost.body.post.id}/comments`).send({ body: 'A curious comment.' })).status, 404, 'unauthorized members cannot comment on private posts');
+    assert.equal((await cara.post(`/api/social/posts/${privatePost.body.post.id}/reactions`).send({ emoji: '👀' })).status, 404, 'unauthorized members cannot react to private posts');
+    const comment = await bob.post(`/api/social/posts/${privatePost.body.post.id}/comments`).send({ body: 'The dumplings are legendary.' });
+    assert.equal(comment.status, 201);
+    assert.equal((await alice.get('/api/social/notifications')).body.notifications.some((item: any) => item.type === 'POST_COMMENT' && item.entityId === privatePost.body.post.id), true, 'authors are notified about new comments');
+    assert.equal((await alice.patch(`/api/social/posts/${privatePost.body.post.id}/comments/${comment.body.comment.id}`).send({ body: 'Not your comment.' })).status, 404, 'members cannot edit another person’s comment');
+    assert.equal((await bob.patch(`/api/social/posts/${privatePost.body.post.id}/comments/${comment.body.comment.id}`).send({ body: 'The dumplings are truly legendary.' })).status, 200, 'comment authors can edit their own comments');
+    const removedComment = await bob.post(`/api/social/posts/${privatePost.body.post.id}/comments`).send({ body: 'Temporary table talk.' });
+    assert.equal((await bob.delete(`/api/social/posts/${privatePost.body.post.id}/comments/${removedComment.body.comment.id}`)).status, 200, 'comment authors can delete their own comments');
+    assert.equal((await bob.post(`/api/social/posts/${privatePost.body.post.id}/reactions`).send({ emoji: '😂' })).status, 200);
+    assert.equal((await bob.post(`/api/social/posts/${privatePost.body.post.id}/reactions`).send({ emoji: '🔥' })).status, 200, 'a user can change their reaction');
+    assert.equal((await bob.post(`/api/social/posts/${privatePost.body.post.id}/reactions`).send({ emoji: '💯' })).status, 400, 'only the four supported reactions are accepted');
+    const interactions = await bob.get(`/api/social/posts/${privatePost.body.post.id}/interactions`);
+    assert.equal(interactions.body.comments[0].body, 'The dumplings are truly legendary.');
+    assert.deepEqual(interactions.body.reactions, [{ emoji: '🔥', count: 1 }], 'a changed reaction replaces the user’s previous reaction');
+    assert.equal(interactions.body.myReaction, '🔥');
+    assert.equal((await alice.get('/api/social/notifications')).body.notifications.some((item: any) => item.type === 'POST_REACTION' && item.entityId === privatePost.body.post.id), true, 'authors are notified about reactions');
     assert.equal((await alice.get('/api/social/posts?q=definitely-not-in-this-post')).body.posts.length, 0, 'search filters are combined with audience checks');
     assert.equal((await alice.get('/api/social/leaderboard')).body.leaderboard.find((entry: any) => entry.user.id === created[0]!.id).posts, 1);
     const edited = await alice.patch(`/api/social/posts/${privatePost.body.post.id}`).send({ body: 'The same secret dumpling location, edited.' });
@@ -68,14 +89,22 @@ test('social platform protects audiences and preserves histories', { timeout: 18
 
     const conversation = await alice.post(`/api/social/conversations/${created[1]!.id}`).send({});
     assert.equal(conversation.status, 200);
+    const realtimeMessage = new Promise<any>((resolve, reject) => {
+      socketClient!.once('message', resolve);
+      windowlessTimeout(reject, 6000);
+    });
     const sent = await alice.post(`/api/social/conversations/${conversation.body.conversation.id}/messages`).send({ body: 'Bring napkins.' });
     assert.equal(sent.status, 201);
+    const deliveredMessage = await realtimeMessage;
+    assert.equal(deliveredMessage.id, sent.body.message.id, 'the recipient receives the saved message over the message socket event');
+    assert.equal(deliveredMessage.conversationId, conversation.body.conversation.id);
     assert.equal((await bob.get('/api/social/conversations')).body.conversations[0].unread, 1);
     assert.equal((await bob.get(`/api/social/conversations/${conversation.body.conversation.id}/messages`)).body.messages[0].body, 'Bring napkins.');
     assert.equal((await bob.get('/api/social/conversations')).body.conversations[0].unread, 0, 'opening a conversation marks unread messages read');
 
     await alice.delete(`/api/social/friends/${created[1]!.id}`);
     assert.equal((await bob.get('/api/social/posts')).body.posts.some((p: any) => p.id === privatePost.body.post.id), false, 'unfriending revokes existing private-post access');
+    assert.equal((await bob.get(`/api/social/posts/${privatePost.body.post.id}/interactions`)).status, 404, 'unfriending revokes access to private-post interactions too');
     assert.equal((await bob.get(`/api/social/conversations/${conversation.body.conversation.id}/messages`)).body.messages.length, 1, 'historical messages remain visible');
     assert.equal((await alice.post(`/api/social/conversations/${conversation.body.conversation.id}/messages`).send({ body: 'Follow-up' })).status, 403, 'new messages require a current friendship');
     const renewed = await bob.post('/api/social/friend-requests').send({ userId: created[0]!.id });
@@ -90,14 +119,18 @@ test('social platform protects audiences and preserves histories', { timeout: 18
     const publicPost = await bob.post('/api/social/posts').send({ body: 'Public pie report.', visibility: 'PUBLIC' });
     assert.equal(publicPost.status, 201);
     assert.equal((await alice.get('/api/social/posts')).body.posts.some((p: any) => p.id === publicPost.body.post.id), true, 'public posts remain public across blocks');
+    assert.equal((await alice.get(`/api/social/posts/${publicPost.body.post.id}/interactions`)).status, 200, 'public post interactions remain readable across blocks');
+    assert.equal((await alice.post(`/api/social/posts/${publicPost.body.post.id}/comments`).send({ body: 'Blocked but still peeking.' })).status, 403, 'blocks prevent interaction even when the post itself is public');
 
     const requestCara = await alice.post('/api/social/friend-requests').send({ userId: created[2]!.id });
     assert.equal(requestCara.status, 201);
     await cara.post(`/api/social/friend-requests/${requestCara.body.request.id}/accept`);
     assert.equal((await cara.get('/api/social/posts')).body.posts.some((p: any) => p.id === privatePost.body.post.id), false, 'new friends do not gain access to earlier friends-only posts');
-    const event = await alice.post('/api/social/events').send({ title: 'Midnight Soup Council', description: 'Bring opinions.', startsAt: new Date(Date.now() + 86_400_000).toISOString(), visibility: 'INVITE_ONLY', inviteeIds: [created[2]!.id] });
+    const event = await alice.post('/api/social/events').send({ title: 'Midnight Soup Council', description: 'Bring opinions.', location: 'The soup hall', mapUrl: 'https://maps.app.goo.gl/example', startsAt: new Date(Date.now() + 86_400_000).toISOString(), visibility: 'INVITE_ONLY', inviteeIds: [created[2]!.id] });
     assert.equal(event.status, 201, JSON.stringify(event.body));
+    assert.equal(event.body.event.mapUrl, 'https://maps.app.goo.gl/example', 'event form saves the Google Maps link');
     assert.equal(event.body.post.event.id, event.body.event.id, 'one event submission also publishes a linked intel post');
+    assert.ok((await cara.get('/api/social/events')).body.events.some((item: any) => item.id === event.body.event.id && item.intelPostIds.includes(event.body.post.id)), 'event details include only the intel posts this viewer may access');
     const bobPosts = await bob.get('/api/social/posts');
     assert.equal(bobPosts.body.posts.some((p: any) => p.id === event.body.post.id), false, 'events are listed in Events, not duplicated in Intel');
     assert.equal((await bob.get('/api/social/posts?q=Midnight%20Soup')).body.posts.some((p: any) => p.id === event.body.post.id), false, 'event titles are searched in Events, not Intel');
@@ -112,7 +145,9 @@ test('social platform protects audiences and preserves histories', { timeout: 18
     assert.equal((await cara.patch(`/api/social/events/${event.body.event.id}/rsvp`).send({ rsvp: 'MAYBE' })).status, 200);
     assert.ok((await alice.get('/api/social/notifications')).body.notifications.some((n: any) => n.type === 'RSVP_UPDATED'));
     assert.ok((await cara.get('/api/social/notifications')).body.notifications.some((n: any) => n.type === 'EVENT_INVITATION'));
-    assert.equal((await alice.patch(`/api/social/events/${event.body.event.id}`).send({ title: 'Midnight Soup Council, revised' })).status, 200);
+    const updatedEvent = await alice.patch(`/api/social/events/${event.body.event.id}`).send({ title: 'Midnight Soup Council, revised', mapUrl: 'https://www.google.com/maps/place/Soup+Hall' });
+    assert.equal(updatedEvent.status, 200);
+    assert.equal(updatedEvent.body.event.mapUrl, 'https://www.google.com/maps/place/Soup+Hall', 'event edit updates the Google Maps link');
     assert.ok((await cara.get('/api/social/notifications')).body.notifications.some((n: any) => n.type === 'EVENT_UPDATED'));
     const report = await cara.post('/api/social/reports').send({ eventId: event.body.event.id, reason: 'Suspicious soup' });
     assert.equal(report.status, 201);
