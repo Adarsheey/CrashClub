@@ -1,5 +1,6 @@
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import cookieParser from 'cookie-parser';
 import type { PrismaClient } from './generated/prisma/client.js';
 import { avatarUploadDirectory, createAuthRouter, createPublicProfileRouter, type Mailer } from './auth.js';
@@ -31,6 +32,20 @@ export function createApp(database: DatabaseHealthCheck, authDatabase?: PrismaCl
     app.use('/api/auth', createAuthRouter(authDatabase, mailer));
     app.use('/api/users', createPublicProfileRouter(authDatabase));
     app.use('/api/social', createSocialRouter(authDatabase, notify));
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    const frontendDist = resolve(process.env.FRONTEND_DIST_DIR?.trim() || 'frontend/dist');
+    const frontendIndex = join(frontendDist, 'index.html');
+    if (!existsSync(frontendIndex)) {
+      throw new Error(`Built frontend not found at ${frontendIndex}. Run the frontend production build before starting the server.`);
+    }
+    app.use(express.static(frontendDist, { index: false, dotfiles: 'deny', fallthrough: true, maxAge: '1h' }));
+    app.get(/.*/, (request, response, next) => {
+      if (request.path.startsWith('/api') || request.path.startsWith('/socket.io') || request.path.startsWith('/uploads')) return next();
+      if (!request.accepts('html')) return next();
+      response.sendFile(frontendIndex, (error) => { if (error) next(error); });
+    });
   }
 
   app.use((_request, response) => {

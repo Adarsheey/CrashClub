@@ -27,7 +27,7 @@ io.use(async (socket, next) => {
   } catch { return next(new Error('Could not verify this session.')); }
 });
 io.on('connection', (socket) => { socket.join(`user:${socket.data.userId}`); });
-server.listen(port, () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`Crash Club API listening on http://localhost:${port}`);
 });
 

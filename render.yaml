@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: crash-club
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run db:generate && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY_HOPS
+        value: "1"
+      - key: AUTH_RATE_LIMIT
+        value: "10"
+      - key: SOCIAL_RATE_LIMIT
+        value: "45"
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: DATABASE_URL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        sync: false

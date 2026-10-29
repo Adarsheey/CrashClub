@@ -11,6 +11,7 @@
     "dev:api": "npm --workspace backend run dev",
     "dev:web": "npm --workspace frontend run dev",
     "build": "npm run build --workspace backend && npm run build --workspace frontend",
+    "start": "npm run db:deploy && npm --workspace backend run start",
     "test": "npm test --workspace backend",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",

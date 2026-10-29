@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
     "test": "tsx --test src/app.test.ts src/auth.integration.test.ts src/social.integration.test.ts",
     "db:generate": "prisma generate && node scripts/patch-prisma-runtime.mjs",
     "db:migrate": "prisma migrate dev",

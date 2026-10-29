@@ -120,7 +120,22 @@ For a future schema change, create a reviewed migration in development with `npm
 
 Keep connection strings and all real credentials in local environment files or the deployment platform's secret manager. `.env.example` contains placeholders only. Production database URLs must be configured as deployment secrets; never bake them into frontend assets or commit them to Git.
 
-Production deployment and live email-provider delivery still require your hosting account and secret configuration. Configure `DATABASE_URL`, `APP_ORIGIN`, `NODE_ENV=production`, the `SMTP_*` values, `EMAIL_FROM`, `AUTH_RATE_LIMIT`, `SOCIAL_RATE_LIMIT`, and `TRUST_PROXY_HOPS` in the hosting platform's secret manager. Serve the React build from a static host or web service and proxy `/api` plus WebSocket upgrades for `/socket.io` to the Express server on the same public origin. Set `TRUST_PROXY_HOPS` to the exact proxy count/provider instructions so IP rate limits work correctly; leave it at `0` locally. Do not put server secrets in `VITE_*` variables or frontend code. Profile pictures accept URLs currently; uploaded image storage is not implemented.
+Production deployment and live email-provider delivery still require your hosting account and secret configuration. Configure `DATABASE_URL`, `APP_ORIGIN`, `NODE_ENV=production`, the `SMTP_*` values, `EMAIL_FROM`, `AUTH_RATE_LIMIT`, `SOCIAL_RATE_LIMIT`, and `TRUST_PROXY_HOPS` in the hosting platform's secret manager. Do not put server secrets in `VITE_*` variables or frontend code. Uploaded avatar files need durable storage in production; see the Render setup below.
+
+### Deploy the app on Render
+
+The repository includes a Render Blueprint in `render.yaml` for a single Node web service. The Express server serves the built React app and handles `/api`, avatar files, and Socket.IO from the same origin. This keeps session cookies and real-time connections on one host, without a separate frontend proxy. Render's Node web services must bind to the `PORT` environment variable on `0.0.0.0`; this project does both. See Render's [Node/Express deployment guide](https://render.com/docs/deploy-node-express-app) and [Blueprint reference](https://render.com/docs/blueprint-spec).
+
+1. Push this repository to GitHub. Confirm `.env` is not tracked (`.gitignore` excludes it); only `.env.example` belongs in Git.
+2. In Render, choose **New → Blueprint**, connect the repository, and apply the configuration from `render.yaml`.
+3. Add the prompted `DATABASE_URL` from Neon and SMTP credentials in the Render service's environment settings. Use the Neon pooled PostgreSQL URL and never commit or share it. The Blueprint sets production mode, rate limits, the Render proxy hop, and SMTP port/security defaults.
+4. Render builds with `npm ci && npm run db:generate && npm run build`. Its start command is `npm start`, which applies pending Prisma migrations with `prisma migrate deploy` (no reset) before starting the server. The `/api/health` check confirms database connectivity.
+5. On the standard Render domain, the server uses Render's `RENDER_EXTERNAL_URL` for verification and password-reset links. If you attach a custom domain, set `APP_ORIGIN` to that exact `https://` origin in the service environment.
+6. After deployment, open the service URL and check `/api/health`, registration/email verification, login/logout, profile image upload, and messaging. Verify SMTP delivery before inviting real users.
+
+**Uploaded profile photos need persistent storage.** The included free-tier Blueprint does not attach a disk, so avatars saved there can disappear on redeploy/restart. Before public use, attach a persistent disk through Render if your chosen service plan supports it, mount it at `/var/data`, and set `AVATAR_UPLOAD_DIR=/var/data/avatars`; otherwise use a durable object-storage service in a later change. Confirm the disk's cost and limits in your Render dashboard before enabling it.
+
+The Blueprint uses a single app instance and runs migrations on startup, which keeps the beginner setup simple. For scaled production deployments, move migrations to a dedicated pre-deploy step and use shared/durable storage for uploads and rate-limit state. Render's [deployment guide](https://render.com/docs/deploys) describes its migration/pre-deploy behavior; pre-deploy commands require a paid web service.
 
 ### Profile pictures
 

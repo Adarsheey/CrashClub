@@ -29,8 +29,10 @@ const profileSchema = z.object({
 
 export type Mailer = (to: string, subject: string, url: string) => Promise<void>;
 
+const publicAppOrigin = () => process.env.APP_ORIGIN ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:5173';
+
 export function configuredMailer(): Mailer {
-  const origin = process.env.APP_ORIGIN ?? 'http://localhost:5173';
+  const origin = publicAppOrigin();
   if (process.env.NODE_ENV !== 'production') {
     return async (_to, subject, url) => console.info(`[Crash Club development email] ${subject}: ${url}`);
   }
@@ -38,7 +40,7 @@ export function configuredMailer(): Mailer {
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASSWORD;
   const from = process.env.EMAIL_FROM;
-  if (!host || !user || !pass || !from || !process.env.APP_ORIGIN) {
+  if (!host || !user || !pass || !from || (!process.env.APP_ORIGIN && !process.env.RENDER_EXTERNAL_URL)) {
     throw new Error('Production email requires SMTP_HOST, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, and APP_ORIGIN.');
   }
   const transport = nodemailer.createTransport({ host, port: Number(process.env.SMTP_PORT ?? 587), secure: process.env.SMTP_SECURE === 'true', auth: { user, pass } });
@@ -74,7 +76,7 @@ async function issueEmailToken(prisma: PrismaClient, user: User, purpose: 'VERIF
 export function createAuthRouter(prisma: PrismaClient, suppliedMailer?: Mailer) {
   const router = Router();
   const mailer = suppliedMailer ?? configuredMailer();
-  const appOrigin = process.env.APP_ORIGIN ?? 'http://localhost:5173';
+  const appOrigin = publicAppOrigin();
   const makeRateLimit = (productionLimit: number, windowMs = 15 * 60_000) => rateLimit({
     windowMs,
     limit: Number(process.env.AUTH_RATE_LIMIT_OVERRIDE ?? (process.env.NODE_ENV === 'production' ? process.env.AUTH_RATE_LIMIT ?? productionLimit : 100)),
