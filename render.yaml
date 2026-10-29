@@ -3,7 +3,7 @@ services:
     name: crash-club
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run db:generate && npm run build
+    buildCommand: npm ci --include=dev && npm run db:generate && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
     envVars:
