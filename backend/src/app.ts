@@ -1,6 +1,7 @@
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import cookieParser from 'cookie-parser';
 import type { PrismaClient } from './generated/prisma/client.js';
 import { avatarUploadDirectory, createAuthRouter, createPublicProfileRouter, type Mailer } from './auth.js';
@@ -35,7 +36,10 @@ export function createApp(database: DatabaseHealthCheck, authDatabase?: PrismaCl
   }
 
   if (process.env.NODE_ENV === 'production') {
-    const frontendDist = resolve(process.env.FRONTEND_DIST_DIR?.trim() || 'frontend/dist');
+    const frontendDistOverride = process.env.FRONTEND_DIST_DIR?.trim();
+    const frontendDist = frontendDistOverride
+      ? resolve(frontendDistOverride)
+      : resolve(dirname(fileURLToPath(import.meta.url)), '../../frontend/dist');
     const frontendIndex = join(frontendDist, 'index.html');
     if (!existsSync(frontendIndex)) {
       throw new Error(`Built frontend not found at ${frontendIndex}. Run the frontend production build before starting the server.`);
